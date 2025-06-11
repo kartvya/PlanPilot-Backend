@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+sqlalchemy
+python-multipart
+python-jose
+passlib[bcrypt]
+pydantic
+fitz  # or PyMuPDF
+openai
+streamlit
+requests
