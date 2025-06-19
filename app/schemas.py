@@ -48,6 +48,7 @@ class ProjectRequest(BaseModel):
     project_name: Optional[str] = None
     daily_hours: int = 8
     working_days_per_week: int = 5
+    technologies: Optional[List[str]] = None
 
 class ProjectAnalysis(BaseModel):
     project_name: str
@@ -107,20 +108,16 @@ class StandardResponse(BaseModel):
 
 
 
-# Add these new schemas (can be in schemas.py)
-class DailyTaskRequest(BaseModel):
-    start_date: date
-    project_id: int
+class TechStackResponse(BaseModel):
+    success: bool
+    message: str
+    detected_technologies: Optional[List[str]] = None
+    recommended_technologies: Optional[List[str]] = None
+    technology_categories: Optional[Dict[str, List[str]]] = None
+    error: Optional[str] = None
 
-class TaskLogRequest(BaseModel):
-    project_id: int
-    day_number: int
-    completed_hours: Dict[str, float]  # task_name: hours_completed
-
-class DailyTaskResponse(BaseModel):
-    day: str
-    date: date
-    planned_hours: float
-    tasks: List[Dict[str, Union[str, float]]]
-    carryover_from_previous_days: List[str]
-    message: Optional[str] = None
+class ProjectRequestWithTech(BaseModel):
+    project_name: Optional[str] = None
+    daily_hours: int = 8
+    working_days_per_week: int = 5
+    selected_technologies: List[str]

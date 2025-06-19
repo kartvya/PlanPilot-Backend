@@ -4,7 +4,6 @@ from datetime import timedelta
 
 from app.database import get_db
 from app.auth.auth import (
-    get_current_user,
     get_password_hash, 
     authenticate_user, 
     create_access_token,

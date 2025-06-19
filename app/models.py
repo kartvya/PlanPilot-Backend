@@ -76,3 +76,21 @@ class Project(Base):
     
     user = relationship("User", back_populates="projects")
     document = relationship("Document", back_populates="projects")
+
+
+class DailyLog(Base):
+    __tablename__ = "daily_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    day_number = Column(Integer, nullable=False)
+    target_date = Column(Date, nullable=False)
+    planned_hours = Column(Integer, nullable=False)
+    tasks = Column(JSON, nullable=False)  # Each task includes `task`, `estimated_hours`, `task_done`
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    project = relationship("Project", backref="daily_logs")
+    user = relationship("User", backref="daily_logs")

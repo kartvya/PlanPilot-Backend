@@ -1,657 +1,641 @@
 import streamlit as st
 import requests
 import json
-from datetime import datetime
-import os
-from typing import Optional, Dict, Any
+from datetime import datetime, timedelta
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from typing import Dict, List, Optional
+import time
 
-# Configure Streamlit page
+# Configuration
+API_BASE_URL = "http://localhost:8000"
+
+# Page configuration
 st.set_page_config(
-    page_title="Project Analysis System",
+    page_title="Project Analysis RAG System",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# API Configuration
-API_BASE_URL = "http://localhost:8000"
-
-# Custom CSS
+# Custom CSS for better styling
 st.markdown("""
 <style>
     .main-header {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        color: white;
         text-align: center;
-        color: #1f77b4;
         margin-bottom: 2rem;
     }
-    .project-card {
-        border: 1px solid #ddd;
-        border-radius: 8px;
-        padding: 1rem;
-        margin: 1rem 0;
-        background-color: #f9f9f9;
-    }
-    .project-card:hover {
-        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-        cursor: pointer;
-    }
-    .success-message {
-        color: #28a745;
-        font-weight: bold;
-    }
-    .error-message {
-        color: #dc3545;
-        font-weight: bold;
-    }
-    .info-box {
-        background-color: #e7f3ff;
-        border-left: 4px solid #1f77b4;
-        padding: 1rem;
-        margin: 1rem 0;
-    }
+    
     .metric-card {
-        background-color: #f8f9fa;
-        border-radius: 8px;
+        background: white;
         padding: 1rem;
-        text-align: center;
-        margin: 0.5rem 0;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-left: 4px solid #667eea;
+    }
+    
+    .project-card {
+        background: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border: 1px solid #e9ecef;
+        margin-bottom: 1rem;
+    }
+    
+    .task-completed {
+        background-color: #d4edda;
+        border-left: 4px solid #28a745;
+        padding: 0.5rem;
+        margin: 0.25rem 0;
+        border-radius: 4px;
+    }
+    
+    .task-pending {
+        background-color: #fff3cd;
+        border-left: 4px solid #ffc107;
+        padding: 0.5rem;
+        margin: 0.25rem 0;
+        border-radius: 4px;
+    }
+    
+    .success-message {
+        background-color: #d4edda;
+        color: #155724;
+        padding: 1rem;
+        border-radius: 5px;
+        border: 1px solid #c3e6cb;
+    }
+    
+    .error-message {
+        background-color: #f8d7da;
+        color: #721c24;
+        padding: 1rem;
+        border-radius: 5px;
+        border: 1px solid #f5c6cb;
     }
 </style>
 """, unsafe_allow_html=True)
 
+# Initialize session state
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+if 'user_data' not in st.session_state:
+    st.session_state.user_data = None
+if 'access_token' not in st.session_state:
+    st.session_state.access_token = None
+if 'current_project' not in st.session_state:
+    st.session_state.current_project = None
+
 class APIClient:
-    """Client for interacting with the FastAPI backend"""
-    
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, token: str = None):
         self.base_url = base_url
+        self.token = token
+        self.headers = {"Authorization": f"Bearer {token}"} if token else {}
     
-    def signup(self, username: str, email: str, password: str) -> Dict[str, Any]:
+    def signup(self, username: str, email: str, password: str) -> Dict:
         """Register a new user"""
-        try:
-            response = requests.post(
-                f"{self.base_url}/auth/signup",
-                json={"username": username, "email": email, "password": password}
-            )
-            return {"success": response.status_code == 200, "data": response.json()}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        data = {
+            "username": username,
+            "email": email,
+            "password": password
+        }
+        response = requests.post(f"{self.base_url}/auth/signup", json=data)
+        return response.json(), response.status_code
     
-    def login(self, username: str, password: str) -> Dict[str, Any]:
-        """Authenticate user"""
-        try:
-            response = requests.post(
-                f"{self.base_url}/auth/login",
-                json={"username": username, "password": password}
-            )
-            if response.status_code == 200:
-                return {"success": True, "data": response.json()}
-            else:
-                return {"success": False, "error": response.json().get("detail", "Login failed")}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+    def login(self, username: str, password: str) -> Dict:
+        """Login user"""
+        data = {
+            "username": username,
+            "password": password
+        }
+        response = requests.post(f"{self.base_url}/auth/login", json=data)
+        return response.json(), response.status_code
     
-    def get_user_info(self, token: str) -> Dict[str, Any]:
-        """Get current user information"""
-        try:
-            headers = {"Authorization": f"Bearer {token}"}
-            response = requests.get(f"{self.base_url}/auth/me", headers=headers)
-            if response.status_code == 200:
-                return {"success": True, "data": response.json()}
-            else:
-                return {"success": False, "error": "Failed to get user info"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+    def upload_document(self, file, project_name: str = None, daily_hours: int = 8, working_days: int = 5) -> Dict:
+        """Upload and analyze document"""
+        files = {"file": file}
+        data = {
+            "project_name": project_name if project_name else "",
+            "daily_hours": daily_hours,
+            "working_days_per_week": working_days
+        }
+        response = requests.post(
+            f"{self.base_url}/projects/upload-docs",
+            files=files,
+            data=data,
+            headers=self.headers
+        )
+        return response.json(), response.status_code
     
-    def upload_and_analyze(self, file, token: str, project_name: str = None, daily_hours: int = 8, working_days: int = 5) -> Dict[str, Any]:
-        """Upload document and analyze project"""
-        try:
-            headers = {"Authorization": f"Bearer {token}"}
-            files = {"file": file}
-            data = {
-                "daily_hours": daily_hours,
-                "working_days_per_week": working_days
-            }
-            if project_name:
-                data["project_name"] = project_name
-            
-            response = requests.post(
-                f"{self.base_url}/projects/upload-docs",
-                headers=headers,
-                files=files,
-                data=data
-            )
-            return {"success": response.status_code == 200, "data": response.json()}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+    def get_projects(self) -> List[Dict]:
+        """Get user's projects"""
+        response = requests.get(f"{self.base_url}/projects/my-projects", headers=self.headers)
+        if response.status_code == 200:
+            return response.json()
+        return []
     
-    def get_user_projects(self, token: str) -> Dict[str, Any]:
-        """Get all projects for the user"""
-        try:
-            headers = {"Authorization": f"Bearer {token}"}
-            response = requests.get(f"{self.base_url}/projects/my-projects", headers=headers)
-            if response.status_code == 200:
-                return {"success": True, "data": response.json()}
-            else:
-                return {"success": False, "error": "Failed to fetch projects"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def get_project_details(self, project_id: int, token: str) -> Dict[str, Any]:
+    def get_project_details(self, project_id: int) -> Dict:
         """Get detailed project information"""
-        try:
-            headers = {"Authorization": f"Bearer {token}"}
-            response = requests.get(f"{self.base_url}/projects/project/{project_id}", headers=headers)
-            if response.status_code == 200:
-                return {"success": True, "data": response.json()}
-            else:
-                return {"success": False, "error": "Failed to fetch project details"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+        response = requests.get(f"{self.base_url}/projects/project/{project_id}", headers=self.headers)
+        return response.json(), response.status_code
     
-    def delete_project(self, project_id: int, token: str) -> Dict[str, Any]:
-        """Delete a project"""
-        try:
-            headers = {"Authorization": f"Bearer {token}"}
-            response = requests.delete(f"{self.base_url}/projects/project/{project_id}", headers=headers)
-            return {"success": response.status_code == 200, "data": response.json()}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-# Initialize API client
-api_client = APIClient(API_BASE_URL)
-
-def init_session_state():
-    """Initialize session state variables"""
-    if 'authenticated' not in st.session_state:
-        st.session_state.authenticated = False
-    if 'user_token' not in st.session_state:
-        st.session_state.user_token = None
-    if 'user_info' not in st.session_state:
-        st.session_state.user_info = None
-    if 'current_page' not in st.session_state:
-        st.session_state.current_page = 'login'
-    if 'selected_project' not in st.session_state:
-        st.session_state.selected_project = None
-
-def show_login_page():
-    """Display login/signup page"""
-    st.markdown('<h1 class="main-header">📊 Project Analysis System</h1>', unsafe_allow_html=True)
+    def generate_daily_tasks(self, project_id: int, target_date: str, day_number: int, daily_hours: int = 8) -> Dict:
+        """Generate daily tasks for a project"""
+        data = {
+            "project_id": project_id,
+            "target_date": target_date,
+            "day_number": day_number,
+            "daily_hours": daily_hours
+        }
+        response = requests.post(
+            f"{self.base_url}/projects/generate-daily-tasks",
+            data=data,
+            headers=self.headers
+        )
+        return response.json(), response.status_code
     
-    # Create tabs for login and signup
+    def log_daily_tasks(self, project_id: int, day_number: int, completed_tasks: List[Dict]) -> Dict:
+        """Log completed daily tasks"""
+        data = {
+            "project_id": project_id,
+            "day_number": day_number,
+            "completed_tasks": completed_tasks
+        }
+        response = requests.post(
+            f"{self.base_url}/projects/log-daily-tasks",
+            json=data,
+            headers=self.headers
+        )
+        return response.json(), response.status_code
+    
+    def get_daily_log(self, project_id: int, day_number: int) -> Dict:
+        """Get daily log for a project"""
+        params = {"project_id": project_id, "day_number": day_number}
+        response = requests.get(f"{self.base_url}/projects/daily-log", params=params, headers=self.headers)
+        return response.json(), response.status_code
+
+def show_auth_page():
+    """Display authentication page"""
+    st.markdown('<div class="main-header"><h1>🚀 Project Analysis RAG System</h1><p>Intelligent Project Planning & Task Management</p></div>', unsafe_allow_html=True)
+    
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
     
     with tab1:
         st.subheader("Login to Your Account")
-        
         with st.form("login_form"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
-            submit_login = st.form_submit_button("Login")
+            login_btn = st.form_submit_button("Login", use_container_width=True)
             
-            if submit_login:
+            if login_btn:
                 if username and password:
-                    result = api_client.login(username, password)
-                    if result["success"]:
+                    api_client = APIClient(API_BASE_URL)
+                    result, status_code = api_client.login(username, password)
+                    
+                    if status_code == 200:
                         st.session_state.authenticated = True
-                        st.session_state.user_token = result["data"]["access_token"]
-                        st.session_state.user_info = result["data"]["user"]
-                        st.session_state.current_page = 'dashboard'
+                        st.session_state.user_data = result["user"]
+                        st.session_state.access_token = result["access_token"]
                         st.success("Login successful!")
                         st.rerun()
                     else:
-                        st.error(f"Login failed: {result.get('error', 'Unknown error')}")
+                        st.error(f"Login failed: {result.get('detail', 'Unknown error')}")
                 else:
-                    st.error("Please enter both username and password")
+                    st.error("Please fill in all fields")
     
     with tab2:
         st.subheader("Create New Account")
-        
         with st.form("signup_form"):
-            new_username = st.text_input("Username", key="signup_username")
-            new_email = st.text_input("Email", key="signup_email")
-            new_password = st.text_input("Password", type="password", key="signup_password")
-            confirm_password = st.text_input("Confirm Password", type="password", key="confirm_password")
-            submit_signup = st.form_submit_button("Sign Up")
+            new_username = st.text_input("Username")
+            new_email = st.text_input("Email")
+            new_password = st.text_input("Password", type="password")
+            confirm_password = st.text_input("Confirm Password", type="password")
+            signup_btn = st.form_submit_button("Sign Up", use_container_width=True)
             
-            if submit_signup:
+            if signup_btn:
                 if new_username and new_email and new_password and confirm_password:
-                    if new_password == confirm_password:
-                        result = api_client.signup(new_username, new_email, new_password)
-                        if result["success"]:
-                            st.success("Account created successfully! Please login with your credentials.")
-                        else:
-                            st.error(f"Signup failed: {result.get('error', 'Unknown error')}")
-                    else:
+                    if new_password != confirm_password:
                         st.error("Passwords do not match")
+                    else:
+                        api_client = APIClient(API_BASE_URL)
+                        result, status_code = api_client.signup(new_username, new_email, new_password)
+                        
+                        if status_code == 200:
+                            st.success("Account created successfully! Please login.")
+                        else:
+                            st.error(f"Signup failed: {result.get('detail', 'Unknown error')}")
                 else:
-                    st.error("Please fill all fields")
-
-def show_sidebar():
-    """Display sidebar navigation"""
-    with st.sidebar:
-        st.title("Navigation")
-        
-        if st.session_state.authenticated and st.session_state.user_info:
-            st.success(f"Welcome, {st.session_state.user_info['username']}!")
-            
-            if st.button("🏠 Dashboard"):
-                st.session_state.current_page = 'dashboard'
-                st.session_state.selected_project = None
-                st.rerun()
-            
-            if st.button("📤 Upload Document"):
-                st.session_state.current_page = 'upload'
-                st.rerun()
-            
-            if st.button("📋 My Projects"):
-                st.session_state.current_page = 'projects'
-                st.session_state.selected_project = None
-                st.rerun()
-            
-            st.divider()
-            
-            if st.button("🚪 Logout"):
-                st.session_state.authenticated = False
-                st.session_state.user_token = None
-                st.session_state.user_info = None
-                st.session_state.current_page = 'login'
-                st.session_state.selected_project = None
-                st.rerun()
+                    st.error("Please fill in all fields")
 
 def show_dashboard():
     """Display main dashboard"""
-    st.markdown('<h1 class="main-header">📊 Dashboard</h1>', unsafe_allow_html=True)
+    api_client = APIClient(API_BASE_URL, st.session_state.access_token)
     
-    # Get user projects
-    projects_result = api_client.get_user_projects(st.session_state.user_token)
+    # Header
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown(f'<div class="main-header"><h1>Welcome back, {st.session_state.user_data["username"]}! 👋</h1></div>', unsafe_allow_html=True)
+    with col2:
+        if st.button("Logout", use_container_width=True):
+            st.session_state.authenticated = False
+            st.session_state.user_data = None
+            st.session_state.access_token = None
+            st.session_state.current_project = None
+            st.rerun()
     
-    if projects_result["success"]:
-        projects = projects_result["data"]
-        
-        # Display stats
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Total Projects", len(projects))
-        
-        with col2:
-            complexity_counts = {}
-            for project in projects:
-                # Check both analysis and direct project data
-                analysis = project.get("analysis", {})
-                complexity = analysis.get("complexity_level", project.get("complexity_level", "Unknown"))
-                complexity_counts[complexity] = complexity_counts.get(complexity, 0) + 1
-            most_common = max(complexity_counts.items(), key=lambda x: x[1])[0] if complexity_counts else "None"
-            st.metric("Most Common Complexity", most_common)
-        
-        with col3:
-            recent_projects = len([p for p in projects if p.get("created_at")])
-            st.metric("Recent Projects", recent_projects)
-        
-        # Quick actions
-        st.subheader("Quick Actions")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("📤 Upload New Document", use_container_width=True):
-                st.session_state.current_page = 'upload'
-                st.rerun()
-        
-        with col2:
-            if st.button("📋 View All Projects", use_container_width=True):
-                st.session_state.current_page = 'projects'
-                st.rerun()
-        
-        # Recent projects
-        if projects:
-            st.subheader("Recent Projects")
-            for project in projects[:3]:  # Show last 3 projects
-                with st.container():
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        # Get project name from analysis or fallback
-                        analysis = project.get("analysis", {})
-                        project_name = analysis.get("project_name", project.get("project_name", "Unnamed Project"))
-                        complexity = analysis.get("complexity_level", project.get("complexity_level", "Unknown"))
-                        
-                        # Get duration from time estimation
-                        time_estimation = analysis.get("time_estimation", {})
-                        duration = time_estimation.get("total_duration_weeks", project.get("total_duration_weeks", "N/A"))
-                        
-                        st.write(f"**{project_name}**")
-                        st.write(f"Complexity: {complexity}")
-                        st.write(f"Duration: {duration} weeks" if duration != "N/A" else "Duration: N/A")
-                    with col2:
-                        if st.button("View", key=f"view_{project['id']}"):
-                            st.session_state.selected_project = project['id']
-                            st.session_state.current_page = 'project_detail'
-                            st.rerun()
-                    st.divider()
-    else:
-        st.error("Failed to load dashboard data")
+    # Sidebar Navigation
+    with st.sidebar:
+        st.title("📊 Navigation")
+        page = st.radio("Go to:", ["Dashboard", "Upload Document", "My Projects", "Daily Tasks"], index=0)
+    
+    if page == "Dashboard":
+        show_dashboard_overview(api_client)
+    elif page == "Upload Document":
+        show_upload_page(api_client)
+    elif page == "My Projects":
+        show_projects_page(api_client)
+    elif page == "Daily Tasks":
+        show_daily_tasks_page(api_client)
 
-def show_upload_page():
-    """Display document upload page"""
-    st.markdown('<h1 class="main-header">📤 Upload Document</h1>', unsafe_allow_html=True)
+def show_dashboard_overview(api_client: APIClient):
+    """Show dashboard overview with metrics"""
+    st.header("📈 Dashboard Overview")
+    
+    # Get projects for metrics
+    projects = api_client.get_projects()
+    
+    # Metrics
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total Projects", len(projects), delta=None)
+    
+    with col2:
+        active_projects = [p for p in projects if p.get('complexity_level') in ['Medium', 'High', 'Expert']]
+        st.metric("Active Projects", len(active_projects), delta=None)
+    
+    with col3:
+        if projects:
+            avg_duration = sum([int(p.get('total_duration_weeks', '0').split()[0]) for p in projects if p.get('total_duration_weeks') and p.get('total_duration_weeks').split()[0].isdigit()]) / len(projects) if projects else 0
+            st.metric("Avg Duration", f"{avg_duration:.1f} weeks", delta=None)
+        else:
+            st.metric("Avg Duration", "0 weeks", delta=None)
+    
+    with col4:
+        complexity_counts = {}
+        for p in projects:
+            complexity = p.get('complexity_level', 'Unknown')
+            complexity_counts[complexity] = complexity_counts.get(complexity, 0) + 1
+        most_common = max(complexity_counts.items(), key=lambda x: x[1])[0] if complexity_counts else "None"
+        st.metric("Most Common Complexity", most_common, delta=None)
+    
+    # Recent Projects
+    if projects:
+        st.subheader("📋 Recent Projects")
+        for project in projects[:3]:
+            with st.container():
+                st.markdown(f"""
+                <div class="project-card">
+                    <h4>{project['project_name']}</h4>
+                    <p><strong>Summary:</strong> {project['project_summary'][:200]}...</p>
+                    <p><strong>Complexity:</strong> {project['complexity_level']} | <strong>Duration:</strong> {project.get('total_duration_weeks', 'N/A')}</p>
+                    <p><small>Created: {datetime.fromisoformat(project['created_at'].replace('Z', '+00:00')).strftime('%B %d, %Y')}</small></p>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Project complexity distribution chart
+        if len(projects) > 1:
+            st.subheader("📊 Project Complexity Distribution")
+            complexity_data = {}
+            for project in projects:
+                complexity = project.get('complexity_level', 'Unknown')
+                complexity_data[complexity] = complexity_data.get(complexity, 0) + 1
+            
+            fig = px.pie(
+                values=list(complexity_data.values()),
+                names=list(complexity_data.keys()),
+                title="Projects by Complexity Level"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No projects yet. Upload your first document to get started!")
+
+def show_upload_page(api_client: APIClient):
+    """Show document upload page"""
+    st.header("📄 Upload & Analyze Document")
+    
+    st.markdown("""
+    Upload your project documentation (PDF or TXT) and our AI will analyze it to:
+    - Extract project requirements and scope
+    - Estimate time and resources needed
+    - Generate detailed task breakdowns
+    - Recommend technology stack
+    """)
     
     with st.form("upload_form"):
-        st.subheader("Upload Project Document")
+        uploaded_file = st.file_uploader("Choose a file", type=['pdf', 'txt'])
         
-        # File upload
-        uploaded_file = st.file_uploader(
-            "Choose a file",
-            type=['pdf', 'txt'],
-            help="Upload a PDF or TXT file containing project requirements"
-        )
-        
-        # Project configuration
         col1, col2 = st.columns(2)
-        
         with col1:
-            project_name = st.text_input(
-                "Project Name (Optional)",
-                help="Leave empty to auto-generate based on document content"
-            )
-            daily_hours = st.number_input(
-                "Daily Working Hours",
-                min_value=1,
-                max_value=16,
-                value=8,
-                help="Average number of hours worked per day"
-            )
+            project_name = st.text_input("Project Name (optional)", placeholder="Leave empty for auto-generation")
+            daily_hours = st.number_input("Daily Working Hours", min_value=1, max_value=16, value=8)
         
         with col2:
-            working_days = st.number_input(
-                "Working Days per Week",
-                min_value=1,
-                max_value=7,
-                value=5,
-                help="Number of working days per week"
-            )
+            working_days = st.number_input("Working Days per Week", min_value=1, max_value=7, value=5)
         
-        submit_upload = st.form_submit_button("Upload and Analyze", use_container_width=True)
+        submit_btn = st.form_submit_button("Upload & Analyze", use_container_width=True)
         
-        if submit_upload:
-            if uploaded_file is not None:
-                with st.spinner("Uploading and analyzing document..."):
-                    result = api_client.upload_and_analyze(
-                        uploaded_file,
-                        st.session_state.user_token,
-                        project_name if project_name else None,
-                        daily_hours,
-                        working_days
+        if submit_btn and uploaded_file is not None:
+            with st.spinner("Processing document... This may take a moment."):
+                try:
+                    result, status_code = api_client.upload_document(
+                        uploaded_file, project_name, daily_hours, working_days
                     )
                     
-                    if result["success"]:
+                    if status_code == 200 and result.get('success'):
                         st.success("Document uploaded and analyzed successfully!")
-                        st.session_state.current_page = 'projects'
-                        st.rerun()
+                        
+                        # Display analysis results
+                        if result.get('analysis'):
+                            analysis = result['analysis']
+                            
+                            st.subheader("📊 Analysis Results")
+                            
+                            # Project overview
+                            col1, col2 = st.columns([2, 1])
+                            with col1:
+                                st.markdown(f"**Project Name:** {analysis['project_name']}")
+                                st.markdown(f"**Summary:** {analysis['project_summary']}")
+                                st.markdown(f"**Complexity:** {analysis['complexity_level']}")
+                            
+                            with col2:
+                                if analysis.get('time_estimation'):
+                                    est = analysis['time_estimation']
+                                    st.metric("Total Duration", est.get('total_duration_weeks', 'N/A'))
+                                    st.metric("Estimated Hours", est.get('total_hours_estimated', 'N/A'))
+                            
+                            # Scope and deliverables
+                            st.subheader("🎯 Scope & Deliverables")
+                            st.write(analysis['scope_and_deliverables'])
+                            
+                            # Developer tasks
+                            if analysis.get('developer_tasks'):
+                                st.subheader("✅ Developer Tasks")
+                                for i, task in enumerate(analysis['developer_tasks'], 1):
+                                    st.write(f"{i}. {task}")
+                            
+                            # Technology stack
+                            if analysis.get('technology_stack'):
+                                st.subheader("🛠️ Technology Stack")
+                                tech_cols = st.columns(min(len(analysis['technology_stack']), 4))
+                                for i, tech in enumerate(analysis['technology_stack']):
+                                    with tech_cols[i % 4]:
+                                        st.info(tech)
+                            
+                            # Time estimation details
+                            if analysis.get('time_estimation'):
+                                st.subheader("⏱️ Time Estimation Breakdown")
+                                est = analysis['time_estimation']
+                                
+                                time_data = []
+                                for key, value in est.items():
+                                    if value and value != 'N/A':
+                                        time_data.append({
+                                            'Phase': key.replace('_', ' ').title(),
+                                            'Duration': value
+                                        })
+                                
+                                if time_data:
+                                    df = pd.DataFrame(time_data)
+                                    st.table(df)
+                        
+                        st.session_state.current_project = result.get('project_id')
+                        
                     else:
-                        st.error(f"Upload failed: {result.get('error', 'Unknown error')}")
-            else:
-                st.error("Please select a file to upload")
-
-def show_projects_page():
-    """Display all user projects"""
-    st.markdown('<h1 class="main-header">📋 My Projects</h1>', unsafe_allow_html=True)
-    
-    # Get user projects
-    projects_result = api_client.get_user_projects(st.session_state.user_token)
-    
-    if projects_result["success"]:
-        projects = projects_result["data"]
-        
-        if not projects:
-            st.info("No projects found. Upload a document to create your first project.")
-            if st.button("📤 Upload Document"):
-                st.session_state.current_page = 'upload'
-                st.rerun()
-        else:
-            # Get unique complexity levels from both analysis and direct project data
-            complexity_options = set()
-            for project in projects:
-                analysis = project.get("analysis", {})
-                complexity = analysis.get("complexity_level", project.get("complexity_level", "Unknown"))
-                complexity_options.add(complexity)
-            
-            # Filter and search
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                search_term = st.text_input("🔍 Search projects", placeholder="Enter project name...")
-            with col2:
-                complexity_filter = st.selectbox(
-                    "Filter by Complexity",
-                    ["All"] + list(complexity_options)
-                )
-            
-            # Apply filters
-            filtered_projects = projects
-            if search_term:
-                filtered_projects = []
-                for p in projects:
-                    analysis = p.get("analysis", {})
-                    project_name = analysis.get("project_name", p.get("project_name", ""))
-                    if search_term.lower() in project_name.lower():
-                        filtered_projects.append(p)
-            
-            if complexity_filter != "All":
-                temp_filtered = []
-                for p in filtered_projects:
-                    analysis = p.get("analysis", {})
-                    complexity = analysis.get("complexity_level", p.get("complexity_level", "Unknown"))
-                    if complexity == complexity_filter:
-                        temp_filtered.append(p)
-                filtered_projects = temp_filtered
-            
-            st.write(f"Showing {len(filtered_projects)} of {len(projects)} projects")
-            
-            # Display projects
-            for project in filtered_projects:
-                with st.container():
-                    st.markdown('<div class="project-card">', unsafe_allow_html=True)
-                    
-                    col1, col2, col3 = st.columns([2, 1, 1])
-                    
-                    with col1:
-                        # Get project details from analysis or fallback
-                        analysis = project.get("analysis", {})
-                        project_name = analysis.get("project_name", project.get("project_name", "Unnamed Project"))
-                        complexity = analysis.get("complexity_level", project.get("complexity_level", "Unknown"))
+                        st.error(f"Analysis failed: {result.get('error', 'Unknown error')}")
                         
-                        # Get duration from time estimation
-                        time_estimation = analysis.get("time_estimation", {})
-                        duration = time_estimation.get("total_duration_weeks", project.get("total_duration_weeks", "N/A"))
-                        
-                        st.subheader(project_name)
-                        st.write(f"**Complexity:** {complexity}")
-                        st.write(f"**Duration:** {duration} weeks" if duration != "N/A" else "**Duration:** N/A")
-                        if project.get("created_at"):
-                            st.write(f"**Created:** {project['created_at'][:10]}")
-                    
-                    with col2:
-                        if st.button("👁️ View Details", key=f"view_detail_{project['id']}"):
-                            st.session_state.selected_project = project['id']
-                            st.session_state.current_page = 'project_detail'
-                            st.rerun()
-                    
-                    with col3:
-                        if st.button("🗑️ Delete", key=f"delete_{project['id']}"):
-                            result = api_client.delete_project(project['id'], st.session_state.user_token)
-                            if result["success"]:
-                                st.success("Project deleted successfully!")
-                                st.rerun()
-                            else:
-                                st.error("Failed to delete project")
-                    
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    st.divider()
-    else:
-        st.error("Failed to load projects")
+                except Exception as e:
+                    st.error(f"Upload failed: {str(e)}")
 
-def show_project_detail():
-    """Display detailed project information"""
-    if not st.session_state.selected_project:
-        st.error("No project selected")
+def show_projects_page(api_client: APIClient):
+    """Show projects page"""
+    st.header("📁 My Projects")
+    
+    projects = api_client.get_projects()
+    
+    if not projects:
+        st.info("No projects found. Upload a document to create your first project.")
         return
     
-    # Get project details
-    result = api_client.get_project_details(
-        st.session_state.selected_project,
-        st.session_state.user_token
-    )
+    # Search and filter
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        search_term = st.text_input("🔍 Search projects", placeholder="Enter project name or keyword")
+    with col2:
+        complexity_filter = st.selectbox("Filter by complexity", ["All", "Low", "Medium", "High", "Expert"])
     
-    if result["success"]:
-        project = result["data"]
-        analysis = project.get("analysis", {})
-        time_estimation = analysis.get("time_estimation", {})
-        
-        # Extract project name from analysis or fallback to project name
-        project_name = analysis.get("project_name", project.get("project_name", "Project Details"))
-        
-        st.markdown(f'<h1 class="main-header">📋 {project_name}</h1>', 
-                   unsafe_allow_html=True)
-        
-        # Back button
-        if st.button("← Back to Projects"):
-            st.session_state.current_page = 'projects'
-            st.session_state.selected_project = None
-            st.rerun()
-        
-        # Project overview
-        st.subheader("Project Overview")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            complexity = analysis.get("complexity_level", project.get("complexity_level", "Unknown"))
-            st.metric("Complexity Level", complexity)
-        with col2:
-            duration = time_estimation.get("total_duration_weeks", project.get("total_duration_weeks", "N/A"))
-            duration_text = f"{duration} weeks" if duration != "N/A" else "N/A"
-            st.metric("Total Duration", duration_text)
-        with col3:
-            # Extract hours from time estimation
-            total_hours = time_estimation.get("total_hours_estimated", 
-                         time_estimation.get("base_hours_required", 
-                         project.get("total_hours", "N/A")))
-            if isinstance(total_hours, str) and "hours" in total_hours:
-                total_hours = total_hours.split()[0]  # Extract number from "600 hours"
-            hours_text = f"{total_hours} hours" if total_hours != "N/A" else "N/A"
-            st.metric("Total Hours", hours_text)
-        
-        # Project Summary
-        if analysis.get("project_summary"):
-            st.subheader("Project Summary")
-            st.write(analysis["project_summary"])
-        
-        # Scope and Deliverables
-        if analysis.get("scope_and_deliverables"):
-            st.subheader("Scope and Deliverables")
-            st.write(analysis["scope_and_deliverables"])
-        
-        # Time Estimation Details
-        if time_estimation:
-            st.subheader("Time Estimation Breakdown")
+    # Filter projects
+    filtered_projects = projects
+    if search_term:
+        filtered_projects = [p for p in filtered_projects if search_term.lower() in p['project_name'].lower() or search_term.lower() in p['project_summary'].lower()]
+    if complexity_filter != "All":
+        filtered_projects = [p for p in filtered_projects if p.get('complexity_level') == complexity_filter]
+    
+    # Display projects
+    for project in filtered_projects:
+        with st.expander(f"📋 {project['project_name']} ({project['complexity_level']})", expanded=False):
+            col1, col2 = st.columns([3, 1])
             
-            col1, col2 = st.columns(2)
             with col1:
-                if time_estimation.get("base_hours_required"):
-                    st.info(f"**Base Hours:** {time_estimation['base_hours_required']}")
-                if time_estimation.get("total_hours_estimated"):
-                    st.info(f"**Total Hours (with buffer):** {time_estimation['total_hours_estimated']}")
-                if time_estimation.get("total_duration_days"):
-                    st.info(f"**Total Days:** {time_estimation['total_duration_days']}")
+                st.markdown(f"**Summary:** {project['project_summary']}")
+                st.markdown(f"**Duration:** {project.get('total_duration_weeks', 'N/A')}")
+                st.markdown(f"**Created:** {datetime.fromisoformat(project['created_at'].replace('Z', '+00:00')).strftime('%B %d, %Y at %I:%M %p')}")
             
             with col2:
-                if time_estimation.get("development_phase"):
-                    st.info(f"**Development Phase:** {time_estimation['development_phase']}")
-                if time_estimation.get("testing_phase"):
-                    st.info(f"**Testing Phase:** {time_estimation['testing_phase']}")
-                if time_estimation.get("deployment_phase"):
-                    st.info(f"**Deployment Phase:** {time_estimation['deployment_phase']}")
-        
-        # Developer Tasks
-        if analysis.get("developer_tasks"):
-            st.subheader("Developer Tasks")
-            tasks = analysis["developer_tasks"]
-            for i, task in enumerate(tasks, 1):
-                with st.expander(f"Task {i}"):
-                    st.write(task)
-        
-        # Technology Stack
-        if analysis.get("technology_stack"):
-            st.subheader("Technology Stack")
-            tech_cols = st.columns(3)
-            for i, tech in enumerate(analysis["technology_stack"]):
-                with tech_cols[i % 3]:
-                    st.info(tech)
-        
-        # Features (fallback for older data structure)
-        if project.get("features"):
-            st.subheader("Features")
-            features = project["features"]
-            for i, feature in enumerate(features, 1):
-                with st.expander(f"Feature {i}: {feature.get('name', 'Unnamed Feature')}"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.write("**Description:**")
-                        st.write(feature.get("description", "No description available"))
-                        st.write(f"**Complexity:** {feature.get('complexity', 'Unknown')}")
-                    with col2:
-                        st.write(f"**Duration:** {feature.get('duration_days', 'N/A')} days")
-                        st.write(f"**Hours:** {feature.get('hours', 'N/A')} hours")
-        
-        # Requirements (fallback for older data structure)
-        if project.get("requirements"):
-            st.subheader("Requirements")
-            for i, req in enumerate(project["requirements"], 1):
-                st.write(f"{i}. {req}")
-        
-        # Analysis summary (fallback for older data structure)
-        if project.get("analysis_summary"):
-            st.subheader("Analysis Summary")
-            st.markdown(project["analysis_summary"])
-        
-        # Delete project option
-        st.divider()
-        with st.expander("⚠️ Danger Zone"):
-            st.warning("This action cannot be undone!")
-            if st.button("🗑️ Delete This Project", type="secondary"):
-                result = api_client.delete_project(
-                    st.session_state.selected_project,
-                    st.session_state.user_token
-                )
-                if result["success"]:
-                    st.success("Project deleted successfully!")
-                    st.session_state.current_page = 'projects'
-                    st.session_state.selected_project = None
+                if st.button(f"View Details", key=f"view_{project['id']}"):
+                    show_project_details(api_client, project['id'])
+                
+                if st.button(f"Daily Tasks", key=f"tasks_{project['id']}"):
+                    st.session_state.current_project = project['id']
                     st.rerun()
-                else:
-                    st.error("Failed to delete project")
-    else:
-        st.error("Failed to load project details")
 
+def show_project_details(api_client: APIClient, project_id: int):
+    """Show detailed project information"""
+    result, status_code = api_client.get_project_details(project_id)
+    
+    if status_code == 200:
+        project = result
+        
+        st.subheader(f"📋 {project['project_name']}")
+        
+        # Basic info
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Complexity", project['complexity_level'])
+        with col2:
+            st.metric("Duration", project.get('total_duration_weeks', 'N/A'))
+        with col3:
+            st.metric("Estimated Hours", project.get('total_hours_estimated', 'N/A'))
+        
+        # Detailed information tabs
+        tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Tasks", "Technology", "Timeline"])
+        
+        with tab1:
+            st.markdown("**Project Summary:**")
+            st.write(project['project_summary'])
+            
+            st.markdown("**Scope & Deliverables:**")
+            st.write(project['scope_and_deliverables'])
+        
+        with tab2:
+            st.markdown("**Developer Tasks:**")
+            for i, task in enumerate(project.get('developer_tasks', []), 1):
+                st.write(f"{i}. {task}")
+        
+        with tab3:
+            st.markdown("**Technology Stack:**")
+            if project.get('technology_stack'):
+                tech_cols = st.columns(min(len(project['technology_stack']), 3))
+                for i, tech in enumerate(project['technology_stack']):
+                    with tech_cols[i % 3]:
+                        st.info(tech)
+        
+        with tab4:
+            st.markdown("**Timeline Breakdown:**")
+            timeline_data = {
+                'Development Phase': project.get('development_phase', 'N/A'),
+                'Testing Phase': project.get('testing_phase', 'N/A'),
+                'Deployment Phase': project.get('deployment_phase', 'N/A'),
+                'Buffer Included': project.get('buffer_included', 'N/A')
+            }
+            
+            for phase, duration in timeline_data.items():
+                st.write(f"**{phase}:** {duration}")
+
+def show_daily_tasks_page(api_client: APIClient):
+    """Show daily tasks management page"""
+    st.header("📅 Daily Tasks Management")
+    
+    # Project selection
+    projects = api_client.get_projects()
+    if not projects:
+        st.info("No projects found. Please create a project first.")
+        return
+    
+    # Project selector
+    project_options = {f"{p['project_name']} (ID: {p['id']})": p['id'] for p in projects}
+    selected_project_key = st.selectbox("Select Project", list(project_options.keys()))
+    selected_project_id = project_options[selected_project_key]
+    
+    if selected_project_id:
+        st.session_state.current_project = selected_project_id
+        
+        # Date and day selection
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            target_date = st.date_input("Target Date", value=datetime.now().date())
+        with col2:
+            day_number = st.number_input("Day Number", min_value=1, value=1)
+        with col3:
+            daily_hours = st.number_input("Daily Hours", min_value=1, max_value=16, value=8)
+        
+        # Generate tasks button
+        if st.button("Generate Daily Tasks", use_container_width=True):
+            with st.spinner("Generating daily tasks..."):
+                result, status_code = api_client.generate_daily_tasks(
+                    selected_project_id, 
+                    target_date.strftime("%Y-%m-%d"), 
+                    day_number, 
+                    daily_hours
+                )
+                
+                if status_code == 200 and result.get('success'):
+                    st.success("Daily tasks generated successfully!")
+                    st.session_state[f"tasks_{selected_project_id}_{day_number}"] = result['daily_tasks']
+                else:
+                    st.error(f"Failed to generate tasks: {result.get('error', 'Unknown error')}")
+        
+        # Display and manage tasks
+        task_key = f"tasks_{selected_project_id}_{day_number}"
+        if task_key in st.session_state:
+            daily_tasks = st.session_state[task_key]
+            
+            st.subheader(f"📋 Tasks for {daily_tasks['day']} ({daily_tasks['date']})")
+            st.info(f"Planned Hours: {daily_tasks['planned_hours']} hours")
+            
+            # Task management
+            completed_tasks = []
+            
+            with st.form(f"task_form_{day_number}"):
+                st.markdown("**Mark completed tasks:**")
+                
+                for i, task in enumerate(daily_tasks['tasks']):
+                    task_completed = st.checkbox(
+                        f"{task['task']} ({task['estimated_hours']}h)",
+                        key=f"task_{i}_{day_number}",
+                        value=task.get('task_done', False)
+                    )
+                    
+                    if task_completed:
+                        completed_tasks.append({
+                            'task': task['task'],
+                            'estimated_hours': task['estimated_hours']
+                        })
+                
+                submit_tasks = st.form_submit_button("Update Task Status", use_container_width=True)
+                
+                if submit_tasks:
+                    result, status_code = api_client.log_daily_tasks(
+                        selected_project_id, day_number, completed_tasks
+                    )
+                    
+                    if status_code == 200 and result.get('success'):
+                        st.success(f"Tasks updated! Completed: {result['completed_count']}, Remaining: {result['remaining_count']}")
+                    else:
+                        st.error(f"Failed to update tasks: {result.get('error', 'Unknown error')}")
+        
+        # Load existing daily log
+        st.subheader("📊 Daily Log History")
+        if st.button("Load Daily Log"):
+            result, status_code = api_client.get_daily_log(selected_project_id, day_number)
+            
+            if status_code == 200 and result.get('success'):
+                log_data = result['log']
+                
+                st.info(f"Date: {log_data['date']} | Planned Hours: {log_data['planned_hours']}")
+                
+                completed_count = sum(1 for task in log_data['tasks'] if task.get('task_done', False))
+                total_count = len(log_data['tasks'])
+                
+                # Progress bar
+                progress = completed_count / total_count if total_count > 0 else 0
+                st.progress(progress)
+                st.write(f"Progress: {completed_count}/{total_count} tasks completed ({progress:.1%})")
+                
+                # Task list with status
+                for task in log_data['tasks']:
+                    status = "✅" if task.get('task_done', False) else "⏳"
+                    css_class = "task-completed" if task.get('task_done', False) else "task-pending"
+                    
+                    st.markdown(f"""
+                    <div class="{css_class}">
+                        {status} <strong>{task['task']}</strong> ({task['estimated_hours']}h)
+                    </div>
+                    """, unsafe_allow_html=True)
+            else:
+                st.warning("No daily log found for this day.")
+
+# Main application logic
 def main():
-    """Main application function"""
-    init_session_state()
-    
-    # Show sidebar if authenticated
-    if st.session_state.authenticated:
-        show_sidebar()
-    
-    # Route to appropriate page
     if not st.session_state.authenticated:
-        show_login_page()
+        show_auth_page()
     else:
-        if st.session_state.current_page == 'dashboard':
-            show_dashboard()
-        elif st.session_state.current_page == 'upload':
-            show_upload_page()
-        elif st.session_state.current_page == 'projects':
-            show_projects_page()
-        elif st.session_state.current_page == 'project_detail':
-            show_project_detail()
-        else:
-            show_dashboard()
+        show_dashboard()
 
 if __name__ == "__main__":
     main()
