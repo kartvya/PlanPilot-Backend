@@ -24,14 +24,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# @app.on_event("startup")
-# async def startup_event():
-#     """Create database tables and perform startup tasks"""
-#     try:
-#         create_tables()
-#         print("✅ Database tables created successfully")
-#     except Exception as e:
-#         print(f"❌ Error creating database tables: {e}")
+@app.on_event("startup")
+async def startup_event():
+    """Create database tables and perform startup tasks"""
+    try:
+        create_tables()
+        print("✅ Database tables created successfully")
+    except Exception as e:
+        print(f"❌ Error creating database tables: {e}")
 
 app.include_router(auth.router)
 app.include_router(project.router)
